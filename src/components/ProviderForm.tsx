@@ -4,6 +4,7 @@ import { open } from '@tauri-apps/plugin-shell'
 import { isValidHttpUrl } from '@/utils/url'
 import Button from './ui/Button'
 import Input from './ui/Input'
+import KeyValueInput from './ui/KeyValueInput'
 import { EyeIcon, EyeSlashIcon } from '@heroicons/react/24/outline'
 import type { OAuthCredentialView } from '@/types/tauri-commands'
 import { errorMessage } from '@/utils/errors'
@@ -472,6 +473,30 @@ export default function ProviderForm({
               <label htmlFor={param.key} className="text-sm font-medium text-gray-700 dark:text-gray-300">
                 {param.description}
               </label>
+            </div>
+          )
+        }
+
+        // Handle key-value headers parameter
+        if (param.param_type === 'headers') {
+          const headersValue: Record<string, string> = (() => {
+            try {
+              return config[param.key] ? JSON.parse(config[param.key]) : {}
+            } catch {
+              return {}
+            }
+          })()
+          return (
+            <div key={param.key}>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                {label}
+              </label>
+              <KeyValueInput
+                value={headersValue}
+                onChange={(v) => handleConfigChange(param.key, JSON.stringify(v))}
+                keyPlaceholder="Header Name"
+                valuePlaceholder="Header Value"
+              />
             </div>
           )
         }
