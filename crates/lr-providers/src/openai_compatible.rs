@@ -55,10 +55,22 @@ impl OpenAICompatibleProvider {
     }
 
     /// Apply the optional auth header and any extra headers to a request builder.
+    ///
+    /// If `extra_headers` already contains an `Authorization` header, it takes
+    /// precedence and the built-in ****** header is skipped, allowing custom
+    /// authentication schemes to override the default.
     fn apply_headers(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        if let Some(auth) = self.auth_header() {
-            request = request.header("Authorization", auth);
+        let extra_has_auth = self
+            .extra_headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("Authorization"));
+
+        if !extra_has_auth {
+            if let Some(auth) = self.auth_header() {
+                request = request.header("Authorization", auth);
+            }
         }
+
         for (name, value) in &self.extra_headers {
             request = request.header(name.as_str(), value.as_str());
         }
@@ -714,6 +726,21 @@ mod tests {
             None,
         );
         assert_eq!(provider.base_url, "http://localhost:8080/v1");
+    }
+
+    #[test]
+    fn test_with_extra_headers() {
+        let headers = vec![
+            ("X-Custom-Auth".to_string(), "my-token".to_string()),
+            ("X-Tenant-ID".to_string(), "acme".to_string()),
+        ];
+        let provider = OpenAICompatibleProvider::new(
+            "test".to_string(),
+            "http://localhost:8080/v1".to_string(),
+            None,
+        )
+        .with_extra_headers(headers.clone());
+        assert_eq!(provider.extra_headers, headers);
     }
 
     #[tokio::test]
