@@ -669,7 +669,9 @@ impl ProviderFactory for OpenAICompatibleProviderFactory {
         // Use BTreeMap for deterministic (alphabetical) ordering.
         let extra_headers: Vec<(String, String)> = config
             .get("extra_headers")
-            .and_then(|s| serde_json::from_str::<std::collections::BTreeMap<String, String>>(s).ok())
+            .and_then(|s| {
+                serde_json::from_str::<std::collections::BTreeMap<String, String>>(s).ok()
+            })
             .map(|m| m.into_iter().collect())
             .unwrap_or_default();
 
