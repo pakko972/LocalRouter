@@ -79,7 +79,8 @@ impl OpenAICompatibleProvider {
 
     /// Override model-discovery endpoint when model listing lives on a different host/path.
     pub fn with_model_discovery_url(mut self, model_discovery_url: Option<String>) -> Self {
-        self.model_discovery_url = model_discovery_url.map(|url| url.trim_end_matches('/').to_string());
+        self.model_discovery_url =
+            model_discovery_url.map(|url| url.trim_end_matches('/').to_string());
         self
     }
 
@@ -201,8 +202,12 @@ fn parse_litellm_model_info_item(model: &Value) -> Option<ParsedModelEntry> {
 /// - `[...]`
 /// - `{"model_info":{"model-id":{...}}}`
 fn parse_litellm_model_info_response(body: &str) -> Result<Vec<ParsedModelEntry>, AppError> {
-    let value: Value = serde_json::from_str(body)
-        .map_err(|e| AppError::Provider(format!("Failed to parse LiteLLM model/info response: {}", e)))?;
+    let value: Value = serde_json::from_str(body).map_err(|e| {
+        AppError::Provider(format!(
+            "Failed to parse LiteLLM model/info response: {}",
+            e
+        ))
+    })?;
 
     if let Some(map) = value.get("model_info").and_then(Value::as_object) {
         let mut models = Vec::new();
@@ -471,20 +476,40 @@ impl ModelProvider for OpenAICompatibleProvider {
             .await
             .map_err(|e| AppError::Provider(format!("Failed to read models response: {}", e)))?;
 
-        let parsed_models: Vec<ParsedModelEntry> = match parse_models_response(&body) {
-            Ok(model_list) => model_list
-                .into_iter()
-                .map(|model| ParsedModelEntry {
-                    id: model.id,
-                    context_window: None,
+        let parsed_models: Vec<ParsedModelEntry> = if self.model_discovery_url.is_some() {
+            match parse_litellm_model_info_response(&body) {
+                Ok(models) => models,
+                Err(litellm_err) => parse_models_response(&body)
+                    .map(|model_list| {
+                        model_list
+                            .into_iter()
+                            .map(|model| ParsedModelEntry {
+                                id: model.id,
+                                context_window: None,
+                            })
+                            .collect()
+                    })
+                    .map_err(|openai_err| {
+                        AppError::Provider(format!(
+                            "Failed to parse models response (LiteLLM error: {}; OpenAI error: {})",
+                            litellm_err, openai_err
+                        ))
+                    })?,
+            }
+        } else {
+            parse_models_response(&body)
+                .map(|model_list| {
+                    model_list
+                        .into_iter()
+                        .map(|model| ParsedModelEntry {
+                            id: model.id,
+                            context_window: None,
+                        })
+                        .collect()
                 })
-                .collect(),
-            Err(openai_err) => parse_litellm_model_info_response(&body).map_err(|litellm_err| {
-                AppError::Provider(format!(
-                    "Failed to parse models response (OpenAI error: {}; LiteLLM error: {})",
-                    openai_err, litellm_err
-                ))
-            })?,
+                .map_err(|openai_err| {
+                    AppError::Provider(format!("Failed to parse models response: {}", openai_err))
+                })?
         };
 
         let models = parsed_models
@@ -1046,12 +1071,10 @@ mod tests {
 
         let health = provider.health_check().await;
         assert_eq!(health.status, HealthStatus::Degraded);
-        assert!(
-            health
-                .error_message
-                .unwrap_or_default()
-                .contains("Model discovery endpoint failed")
-        );
+        assert!(health
+            .error_message
+            .unwrap_or_default()
+            .contains("Model discovery endpoint failed"));
     }
 
     #[test]
