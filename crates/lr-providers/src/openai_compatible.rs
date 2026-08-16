@@ -15,6 +15,7 @@ use lr_types::{AppError, AppResult};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::pin::Pin;
 use std::time::Instant;
 
@@ -23,6 +24,7 @@ pub struct OpenAICompatibleProvider {
     name: String,
     api_key: Option<String>,
     base_url: String,
+    model_discovery_url: Option<String>,
     extra_headers: HeaderMap,
     client: Client,
 }
@@ -69,9 +71,17 @@ impl OpenAICompatibleProvider {
             name,
             api_key,
             base_url: base_url.trim_end_matches('/').to_string(),
+            model_discovery_url: None,
             extra_headers: HeaderMap::new(),
             client: crate::http_client::default_client(),
         }
+    }
+
+    /// Override model-discovery endpoint when model listing lives on a different host/path.
+    pub fn with_model_discovery_url(mut self, model_discovery_url: Option<String>) -> Self {
+        self.model_discovery_url =
+            model_discovery_url.map(|url| url.trim_end_matches('/').to_string());
+        self
     }
 
     /// Attach custom HTTP headers sent with every request to this provider
@@ -98,6 +108,12 @@ impl OpenAICompatibleProvider {
             request = request.headers(self.extra_headers.clone());
         }
         request
+    }
+
+    fn resolved_model_discovery_url(&self) -> String {
+        self.model_discovery_url
+            .clone()
+            .unwrap_or_else(|| format!("{}/models", self.base_url))
     }
 }
 
@@ -138,6 +154,91 @@ fn parse_models_response(body: &str) -> Result<Vec<OpenAIModel>, serde_json::Err
         .map(|r| r.data)
         .or_else(|_| serde_json::from_str::<Vec<OpenAIModel>>(body))
         .or_else(|_| serde_json::from_str::<CloudflareModelsResponse>(body).map(|r| r.result))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedModelEntry {
+    id: String,
+    context_window: Option<u32>,
+}
+
+fn parse_u32(value: &Value) -> Option<u32> {
+    value
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .or_else(|| value.as_str().and_then(|s| s.parse::<u32>().ok()))
+}
+
+fn parse_litellm_model_info_item(model: &Value) -> Option<ParsedModelEntry> {
+    let id = model
+        .get("model_name")
+        .and_then(Value::as_str)
+        .or_else(|| model.get("model").and_then(Value::as_str))
+        .or_else(|| {
+            model
+                .get("litellm_params")
+                .and_then(|v| v.get("model"))
+                .and_then(Value::as_str)
+        })?
+        .to_string();
+
+    let context_window = model
+        .get("model_info")
+        .and_then(|info| {
+            info.get("max_input_tokens")
+                .and_then(parse_u32)
+                .or_else(|| info.get("max_tokens").and_then(parse_u32))
+        })
+        .or_else(|| model.get("max_input_tokens").and_then(parse_u32))
+        .or_else(|| model.get("max_tokens").and_then(parse_u32));
+
+    Some(ParsedModelEntry { id, context_window })
+}
+
+/// Parse LiteLLM-specific model/info responses.
+///
+/// Supports:
+/// - `{"data":[...]}`
+/// - `[...]`
+/// - `{"model_info":{"model-id":{...}}}`
+fn parse_litellm_model_info_response(body: &str) -> Result<Vec<ParsedModelEntry>, AppError> {
+    let value: Value = serde_json::from_str(body).map_err(|e| {
+        AppError::Provider(format!(
+            "Failed to parse LiteLLM model/info response: {}",
+            e
+        ))
+    })?;
+
+    if let Some(map) = value.get("model_info").and_then(Value::as_object) {
+        let mut models = Vec::new();
+        for (id, info) in map {
+            let context_window = info
+                .get("max_input_tokens")
+                .and_then(parse_u32)
+                .or_else(|| info.get("max_tokens").and_then(parse_u32));
+            models.push(ParsedModelEntry {
+                id: id.clone(),
+                context_window,
+            });
+        }
+        return Ok(models);
+    }
+
+    let entries = value
+        .get("data")
+        .and_then(Value::as_array)
+        .or_else(|| value.as_array())
+        .ok_or_else(|| {
+            AppError::Provider(
+                "LiteLLM model/info response did not contain 'data' array or top-level array"
+                    .to_string(),
+            )
+        })?;
+
+    Ok(entries
+        .iter()
+        .filter_map(parse_litellm_model_info_item)
+        .collect())
 }
 
 #[derive(Debug, Serialize)]
@@ -277,12 +378,13 @@ impl ModelProvider for OpenAICompatibleProvider {
     async fn health_check(&self) -> ProviderHealth {
         let start = Instant::now();
 
-        // Use /models endpoint for health check
-        let request = self.apply_headers(self.client.get(format!("{}/models", self.base_url)));
+        let discovery_url = self.resolved_model_discovery_url();
+        let request = self.apply_headers(self.client.get(&discovery_url));
 
         let result = request.send().await;
 
         let latency_ms = start.elapsed().as_millis() as u64;
+        let has_discovery_override = self.model_discovery_url.is_some();
 
         match result {
             Ok(response) => {
@@ -306,7 +408,20 @@ impl ModelProvider for OpenAICompatibleProvider {
                         status: HealthStatus::Degraded,
                         latency_ms: Some(latency_ms),
                         last_checked: Utc::now(),
-                        error_message: Some(format!("Server error (HTTP {})", status)),
+                        error_message: Some(format!(
+                            "Model discovery endpoint returned server error (HTTP {})",
+                            status
+                        )),
+                    }
+                } else if has_discovery_override {
+                    ProviderHealth {
+                        status: HealthStatus::Degraded,
+                        latency_ms: Some(latency_ms),
+                        last_checked: Utc::now(),
+                        error_message: Some(format!(
+                            "Model discovery endpoint returned status: {}",
+                            status
+                        )),
                     }
                 } else {
                     ProviderHealth {
@@ -317,17 +432,28 @@ impl ModelProvider for OpenAICompatibleProvider {
                     }
                 }
             }
-            Err(e) => ProviderHealth {
-                status: HealthStatus::Unhealthy,
-                latency_ms: None,
-                last_checked: Utc::now(),
-                error_message: Some(format!("Connection failed: {}", e)),
-            },
+            Err(e) => {
+                if has_discovery_override {
+                    ProviderHealth {
+                        status: HealthStatus::Degraded,
+                        latency_ms: Some(latency_ms),
+                        last_checked: Utc::now(),
+                        error_message: Some(format!("Model discovery endpoint failed: {}", e)),
+                    }
+                } else {
+                    ProviderHealth {
+                        status: HealthStatus::Unhealthy,
+                        latency_ms: None,
+                        last_checked: Utc::now(),
+                        error_message: Some(format!("Connection failed: {}", e)),
+                    }
+                }
+            }
         }
     }
 
     async fn list_models(&self) -> AppResult<Vec<ModelInfo>> {
-        let request = self.apply_headers(self.client.get(format!("{}/models", self.base_url)));
+        let request = self.apply_headers(self.client.get(self.resolved_model_discovery_url()));
 
         let response = request
             .send()
@@ -350,10 +476,43 @@ impl ModelProvider for OpenAICompatibleProvider {
             .await
             .map_err(|e| AppError::Provider(format!("Failed to read models response: {}", e)))?;
 
-        let model_list: Vec<OpenAIModel> = parse_models_response(&body)
-            .map_err(|e| AppError::Provider(format!("Failed to parse models response: {}", e)))?;
+        let parsed_models: Vec<ParsedModelEntry> = if self.model_discovery_url.is_some() {
+            match parse_litellm_model_info_response(&body) {
+                Ok(models) => models,
+                Err(litellm_err) => parse_models_response(&body)
+                    .map(|model_list| {
+                        model_list
+                            .into_iter()
+                            .map(|model| ParsedModelEntry {
+                                id: model.id,
+                                context_window: None,
+                            })
+                            .collect()
+                    })
+                    .map_err(|openai_err| {
+                        AppError::Provider(format!(
+                            "Failed to parse models response (LiteLLM error: {}; OpenAI error: {})",
+                            litellm_err, openai_err
+                        ))
+                    })?,
+            }
+        } else {
+            parse_models_response(&body)
+                .map(|model_list| {
+                    model_list
+                        .into_iter()
+                        .map(|model| ParsedModelEntry {
+                            id: model.id,
+                            context_window: None,
+                        })
+                        .collect()
+                })
+                .map_err(|openai_err| {
+                    AppError::Provider(format!("Failed to parse models response: {}", openai_err))
+                })?
+        };
 
-        let models = model_list
+        let models = parsed_models
             .into_iter()
             .map(|model| {
                 ModelInfo {
@@ -361,7 +520,7 @@ impl ModelProvider for OpenAICompatibleProvider {
                     name: model.id,
                     provider: self.name.clone(),
                     parameter_count: None, // Not available from API
-                    context_window: 4096,  // Default, actual value depends on model
+                    context_window: model.context_window.unwrap_or(4096),
                     supports_streaming: true,
                     capabilities: vec![Capability::Chat, Capability::Completion],
                     detailed_capabilities: None,
@@ -811,6 +970,111 @@ mod tests {
     fn test_parse_models_invalid_json_fails() {
         let body = "not json";
         assert!(parse_models_response(body).is_err());
+    }
+
+    #[test]
+    fn test_parse_litellm_model_info_data_shape() {
+        let body = r#"{
+            "data":[
+              {
+                "model_name":"gpt-4o-mini",
+                "litellm_params":{"model":"openai/gpt-4o-mini"},
+                "model_info":{"max_input_tokens":128000}
+              },
+              {
+                "model":"claude-3-5-sonnet",
+                "model_info":{"max_tokens":"200000"}
+              }
+            ]
+        }"#;
+
+        let models = parse_litellm_model_info_response(body).unwrap();
+        assert_eq!(
+            models,
+            vec![
+                ParsedModelEntry {
+                    id: "gpt-4o-mini".to_string(),
+                    context_window: Some(128000)
+                },
+                ParsedModelEntry {
+                    id: "claude-3-5-sonnet".to_string(),
+                    context_window: Some(200000)
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_litellm_model_info_map_shape() {
+        let body = r#"{
+            "model_info": {
+              "gpt-4o": {"max_tokens": 128000},
+              "claude-3-5-sonnet": {"max_input_tokens": 200000}
+            }
+        }"#;
+
+        let models = parse_litellm_model_info_response(body).unwrap();
+        assert!(models.contains(&ParsedModelEntry {
+            id: "gpt-4o".to_string(),
+            context_window: Some(128000)
+        }));
+        assert!(models.contains(&ParsedModelEntry {
+            id: "claude-3-5-sonnet".to_string(),
+            context_window: Some(200000)
+        }));
+    }
+
+    #[test]
+    fn test_model_discovery_url_resolution() {
+        let default_provider = OpenAICompatibleProvider::new(
+            "test".to_string(),
+            "http://localhost:8080/v1".to_string(),
+            None,
+        );
+        assert_eq!(
+            default_provider.resolved_model_discovery_url(),
+            "http://localhost:8080/v1/models"
+        );
+
+        let custom_provider = OpenAICompatibleProvider::new(
+            "test".to_string(),
+            "http://localhost:8080/v1".to_string(),
+            None,
+        )
+        .with_model_discovery_url(Some("https://example.com/model/info".to_string()));
+        assert_eq!(
+            custom_provider.resolved_model_discovery_url(),
+            "https://example.com/model/info"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_health_check_without_override_connection_failure_is_unhealthy() {
+        let provider = OpenAICompatibleProvider::new(
+            "test".to_string(),
+            "http://127.0.0.1:9/v1".to_string(),
+            None,
+        );
+
+        let health = provider.health_check().await;
+        assert_eq!(health.status, HealthStatus::Unhealthy);
+    }
+
+    #[tokio::test]
+    async fn test_health_check_with_override_connection_failure_is_degraded() {
+        let provider = OpenAICompatibleProvider::new(
+            "test".to_string(),
+            "http://127.0.0.1:9/v1".to_string(),
+            None,
+        )
+        .with_model_discovery_url(Some("http://127.0.0.1:9/model/info".to_string()));
+
+        let health = provider.health_check().await;
+        assert_eq!(health.status, HealthStatus::Degraded);
+        assert!(health
+            .error_message
+            .unwrap_or_default()
+            .contains("Model discovery endpoint failed"));
     }
 
     #[test]

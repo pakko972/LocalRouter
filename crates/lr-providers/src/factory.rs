@@ -690,6 +690,13 @@ impl ProviderFactory for OpenAICompatibleProviderFactory {
                 false,
             ),
             SetupParameter::optional(
+                "model_discovery_url",
+                ParameterType::BaseUrl,
+                "Optional full URL for model discovery (e.g., https://example.com/model/info). If unset, defaults to {base_url}/models",
+                None::<String>,
+                false,
+            ),
+            SetupParameter::optional(
                 "api_key",
                 ParameterType::ApiKey,
                 "API key (optional, not all services require one)",
@@ -718,6 +725,7 @@ impl ProviderFactory for OpenAICompatibleProviderFactory {
             .ok_or_else(|| AppError::Config("base_url is required".to_string()))?
             .clone();
 
+        let model_discovery_url = config.get("model_discovery_url").cloned();
         let api_key = config.get("api_key").cloned();
 
         let extra_headers = match config.get("custom_headers") {
@@ -727,6 +735,7 @@ impl ProviderFactory for OpenAICompatibleProviderFactory {
 
         Ok(Arc::new(
             OpenAICompatibleProvider::new(instance_name, base_url, api_key)
+                .with_model_discovery_url(model_discovery_url)
                 .with_extra_headers(extra_headers),
         ))
     }
@@ -741,6 +750,14 @@ impl ProviderFactory for OpenAICompatibleProviderFactory {
             if !url.starts_with("http://") && !url.starts_with("https://") {
                 return Err(AppError::Config(
                     "base_url must start with http:// or https://".to_string(),
+                ));
+            }
+        }
+
+        if let Some(url) = config.get("model_discovery_url") {
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                return Err(AppError::Config(
+                    "model_discovery_url must start with http:// or https://".to_string(),
                 ));
             }
         }
@@ -2956,6 +2973,19 @@ mod tests {
     }
 
     #[test]
+    fn test_openai_compatible_exposes_model_discovery_url_param() {
+        let factory = OpenAICompatibleProviderFactory;
+        let param = factory
+            .setup_parameters()
+            .into_iter()
+            .find(|p| p.key == "model_discovery_url")
+            .expect("model_discovery_url setup parameter missing");
+        assert_eq!(param.param_type, ParameterType::BaseUrl);
+        assert!(!param.required);
+        assert!(!param.sensitive);
+    }
+
+    #[test]
     fn test_openai_compatible_create_with_custom_headers() {
         let factory = OpenAICompatibleProviderFactory;
         let mut config = HashMap::new();
@@ -2966,6 +2996,22 @@ mod tests {
         config.insert(
             "custom_headers".to_string(),
             "X-Api-Version: 2024-01-01\nX-Tenant: acme".to_string(),
+        );
+        let provider = factory.create("custom".to_string(), config).unwrap();
+        assert_eq!(provider.name(), "custom");
+    }
+
+    #[test]
+    fn test_openai_compatible_create_with_model_discovery_url() {
+        let factory = OpenAICompatibleProviderFactory;
+        let mut config = HashMap::new();
+        config.insert(
+            "base_url".to_string(),
+            "http://localhost:8080/v1".to_string(),
+        );
+        config.insert(
+            "model_discovery_url".to_string(),
+            "https://litellm.example.com/model/info".to_string(),
         );
         let provider = factory.create("custom".to_string(), config).unwrap();
         assert_eq!(provider.name(), "custom");
@@ -2996,6 +3042,21 @@ mod tests {
         );
         config.insert("custom_headers".to_string(), String::new());
         assert!(factory.validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_openai_compatible_validate_rejects_invalid_model_discovery_url() {
+        let factory = OpenAICompatibleProviderFactory;
+        let mut config = HashMap::new();
+        config.insert(
+            "base_url".to_string(),
+            "http://localhost:8080/v1".to_string(),
+        );
+        config.insert(
+            "model_discovery_url".to_string(),
+            "litellm.example.com/model/info".to_string(),
+        );
+        assert!(factory.validate_config(&config).is_err());
     }
 
     // ==================== Updated defaults tests ====================
