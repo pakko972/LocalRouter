@@ -537,6 +537,7 @@ export const mockData = {
       description: "Generic OpenAI-compatible API (LocalAI, LM Studio, vLLM, etc.)",
       setup_parameters: [
         { key: "base_url", param_type: "base_url", required: true, description: "API base URL (e.g., http://localhost:8080/v1)", sensitive: false },
+        { key: "model_discovery_url", param_type: "base_url", required: false, description: "Optional full URL for model discovery (e.g., https://example.com/model/info). If unset, defaults to {base_url}/models", sensitive: false },
         { key: "api_key", param_type: "api_key", required: false, description: "API key (optional, not all services require one)", sensitive: true },
         { key: "custom_headers", param_type: "headers", required: false, description: "Custom HTTP headers sent with every request, one per line (e.g. X-Api-Version: 2024-01-01)", sensitive: false },
       ],

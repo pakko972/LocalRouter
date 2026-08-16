@@ -240,21 +240,27 @@ logging:
 
 ---
 
-### Custom Provider
+### OpenAI-Compatible Custom Provider
 
-For providers not built into LocalRouter:
+For providers that expose an OpenAI-compatible inference API:
 
 ```yaml
 - name: "my-provider"
-  provider_type: "custom"
+  provider_type: "openai_compatible"
   enabled: true
   api_key_ref: "my-provider"
   provider_config:
-    endpoint: "https://api.example.com/v1"  # Required
-    timeout_seconds: 30
-    # Any additional fields your provider needs
-    custom_field: "value"
+    base_url: "https://api.example.com/v1"  # Required, used for chat/completions + embeddings
+    model_discovery_url: "https://litellm-gateway.example.com/model/info"  # Optional full URL
 ```
+
+`model_discovery_url` is optional. When omitted, LocalRouter keeps the legacy behavior and fetches models from:
+
+```text
+{base_url}/models
+```
+
+Use `model_discovery_url` when your provider disables `/v1/models` on the inference base URL but exposes a LiteLLM-style `model/info` endpoint on a different host/path.
 
 ---
 
