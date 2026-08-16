@@ -53,6 +53,7 @@ import { cn } from "@/lib/utils"
 import type { FreeTierKind, ProviderFreeTierStatus, ProviderFeatureSupport, GetProviderFeatureSupportParams } from "@/types/tauri-commands"
 import { ModelPricingBadge } from "@/components/shared/model-pricing-badge"
 import { ProviderFeatureTable } from "@/components/shared/feature-support-matrix"
+import KeyValueInput from "@/components/ui/KeyValueInput"
 
 const FREE_TIER_LABELS: Record<string, string> = {
   none: 'No Free Tier',
@@ -909,6 +910,28 @@ export function ProvidersPanel({
                                           <label htmlFor={`edit-${param.key}`} className="text-sm font-medium">
                                             {param.description}
                                           </label>
+                                        </div>
+                                      )
+                                    }
+
+                                    if (param.param_type === "headers") {
+                                      const headersValue: Record<string, string> = (() => {
+                                        try {
+                                          return editConfig[param.key] ? JSON.parse(editConfig[param.key]) : {}
+                                        } catch {
+                                          return {}
+                                        }
+                                      })()
+                                      const label = `${param.description}${param.required ? "" : " (Optional)"}`
+                                      return (
+                                        <div key={param.key}>
+                                          <label className="block text-sm font-medium mb-2">{label}</label>
+                                          <KeyValueInput
+                                            value={headersValue}
+                                            onChange={(v) => handleConfigFieldChange(param.key, JSON.stringify(v))}
+                                            keyPlaceholder="Header Name"
+                                            valuePlaceholder="Header Value"
+                                          />
                                         </div>
                                       )
                                     }

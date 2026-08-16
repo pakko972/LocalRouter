@@ -23,6 +23,7 @@ pub struct OpenAICompatibleProvider {
     api_key: Option<String>,
     base_url: String,
     client: Client,
+    extra_headers: Vec<(String, String)>,
 }
 
 impl OpenAICompatibleProvider {
@@ -38,12 +39,42 @@ impl OpenAICompatibleProvider {
             api_key,
             base_url: base_url.trim_end_matches('/').to_string(),
             client: crate::http_client::default_client(),
+            extra_headers: Vec::new(),
         }
+    }
+
+    /// Attach custom HTTP headers to every outgoing request.
+    pub fn with_extra_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.extra_headers = headers;
+        self
     }
 
     /// Build authorization header if API key is present
     fn auth_header(&self) -> Option<String> {
         self.api_key.as_ref().map(|key| format!("Bearer {}", key))
+    }
+
+    /// Apply the optional auth header and any extra headers to a request builder.
+    ///
+    /// If `extra_headers` already contains an `Authorization` header, it takes
+    /// precedence and the built-in ****** header is skipped, allowing custom
+    /// authentication schemes to override the default.
+    fn apply_headers(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let extra_has_auth = self
+            .extra_headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("Authorization"));
+
+        if !extra_has_auth {
+            if let Some(auth) = self.auth_header() {
+                request = request.header("Authorization", auth);
+            }
+        }
+
+        for (name, value) in &self.extra_headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+        request
     }
 }
 
@@ -224,13 +255,10 @@ impl ModelProvider for OpenAICompatibleProvider {
         let start = Instant::now();
 
         // Use /models endpoint for health check
-        let mut request = self.client.get(format!("{}/models", self.base_url));
-
-        if let Some(auth) = self.auth_header() {
-            request = request.header("Authorization", auth);
-        }
-
-        let result = request.send().await;
+        let result = self
+            .apply_headers(self.client.get(format!("{}/models", self.base_url)))
+            .send()
+            .await;
 
         let latency_ms = start.elapsed().as_millis() as u64;
 
@@ -277,13 +305,8 @@ impl ModelProvider for OpenAICompatibleProvider {
     }
 
     async fn list_models(&self) -> AppResult<Vec<ModelInfo>> {
-        let mut request = self.client.get(format!("{}/models", self.base_url));
-
-        if let Some(auth) = self.auth_header() {
-            request = request.header("Authorization", auth);
-        }
-
-        let response = request
+        let response = self
+            .apply_headers(self.client.get(format!("{}/models", self.base_url)))
             .send()
             .await
             .map_err(|e| AppError::Provider(format!("Failed to fetch models: {}", e)))?;
@@ -353,17 +376,13 @@ impl ModelProvider for OpenAICompatibleProvider {
             reasoning_effort: request.reasoning_effort,
         };
 
-        let mut req = self
-            .client
-            .post(format!("{}/chat/completions", self.base_url))
-            .header("Content-Type", "application/json")
-            .json(&openai_request);
-
-        if let Some(auth) = self.auth_header() {
-            req = req.header("Authorization", auth);
-        }
-
-        let response = req
+        let response = self
+            .apply_headers(
+                self.client
+                    .post(format!("{}/chat/completions", self.base_url))
+                    .header("Content-Type", "application/json")
+                    .json(&openai_request),
+            )
             .send()
             .await
             .map_err(|e| AppError::Provider(format!("Request failed: {}", e)))?;
@@ -449,17 +468,13 @@ impl ModelProvider for OpenAICompatibleProvider {
             reasoning_effort: request.reasoning_effort,
         };
 
-        let mut req = self
-            .client
-            .post(format!("{}/chat/completions", self.base_url))
-            .header("Content-Type", "application/json")
-            .json(&openai_request);
-
-        if let Some(auth) = self.auth_header() {
-            req = req.header("Authorization", auth);
-        }
-
-        let response = req
+        let response = self
+            .apply_headers(
+                self.client
+                    .post(format!("{}/chat/completions", self.base_url))
+                    .header("Content-Type", "application/json")
+                    .json(&openai_request),
+            )
             .send()
             .await
             .map_err(|e| AppError::Provider(format!("Request failed: {}", e)))?;
@@ -616,17 +631,13 @@ impl ModelProvider for OpenAICompatibleProvider {
             user: request.user,
         };
 
-        let mut http_request = self
-            .client
-            .post(format!("{}/embeddings", self.base_url))
-            .header("Content-Type", "application/json")
-            .json(&openai_request);
-
-        if let Some(auth) = self.auth_header() {
-            http_request = http_request.header("Authorization", auth);
-        }
-
-        let response = http_request
+        let response = self
+            .apply_headers(
+                self.client
+                    .post(format!("{}/embeddings", self.base_url))
+                    .header("Content-Type", "application/json")
+                    .json(&openai_request),
+            )
             .send()
             .await
             .map_err(|e| AppError::Provider(format!("Request failed: {}", e)))?;
@@ -715,6 +726,21 @@ mod tests {
             None,
         );
         assert_eq!(provider.base_url, "http://localhost:8080/v1");
+    }
+
+    #[test]
+    fn test_with_extra_headers() {
+        let headers = vec![
+            ("X-Custom-Auth".to_string(), "my-token".to_string()),
+            ("X-Tenant-ID".to_string(), "acme".to_string()),
+        ];
+        let provider = OpenAICompatibleProvider::new(
+            "test".to_string(),
+            "http://localhost:8080/v1".to_string(),
+            None,
+        )
+        .with_extra_headers(headers.clone());
+        assert_eq!(provider.extra_headers, headers);
     }
 
     #[tokio::test]

@@ -219,6 +219,8 @@ pub enum ParameterType {
     /// OAuth authentication (triggers OAuth flow in UI)
     #[serde(rename = "oauth")]
     OAuth,
+    /// Key-value HTTP headers map
+    Headers,
 }
 
 // ==================== FACTORY IMPLEMENTATIONS ====================
@@ -639,6 +641,13 @@ impl ProviderFactory for OpenAICompatibleProviderFactory {
                 None::<String>,
                 true,
             ),
+            SetupParameter::optional(
+                "extra_headers",
+                ParameterType::Headers,
+                "Custom HTTP headers to include with every request (e.g., for exotic authentication)",
+                None::<String>,
+                false,
+            ),
         ]
     }
 
@@ -656,11 +665,18 @@ impl ProviderFactory for OpenAICompatibleProviderFactory {
 
         let api_key = config.get("api_key").cloned();
 
-        Ok(Arc::new(OpenAICompatibleProvider::new(
-            instance_name,
-            base_url,
-            api_key,
-        )))
+        // Parse extra_headers from JSON string (e.g., `{"X-Custom": "value"}`).
+        // Use BTreeMap for deterministic (alphabetical) ordering.
+        let extra_headers: Vec<(String, String)> = config
+            .get("extra_headers")
+            .and_then(|s| serde_json::from_str::<std::collections::BTreeMap<String, String>>(s).ok())
+            .map(|m| m.into_iter().collect())
+            .unwrap_or_default();
+
+        Ok(Arc::new(
+            OpenAICompatibleProvider::new(instance_name, base_url, api_key)
+                .with_extra_headers(extra_headers),
+        ))
     }
 
     fn validate_config(&self, config: &HashMap<String, String>) -> AppResult<()> {
